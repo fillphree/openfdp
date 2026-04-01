@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, QSize
 from PyQt5.QtGui import QIcon, QKeySequence, QFont
 
-from pdf_view import PDFGraphicsView, ThumbnailWorker
+from pdf_view import PDFGraphicsView, ThumbnailWorker, FONT_SIZE_STEP
 
 THUMB_WIDTH = 140
 THUMB_HEIGHT = 190
@@ -50,6 +50,20 @@ class PDFReader(QMainWindow):
         open_action.setToolTip("Open PDF file (Ctrl+O)")
         open_action.triggered.connect(self.open_file)
         toolbar.addAction(open_action)
+
+        self._save_action = QAction("Save", self)
+        self._save_action.setShortcut("Ctrl+S")
+        self._save_action.setToolTip("Save changes to file (Ctrl+S)")
+        self._save_action.setEnabled(False)
+        self._save_action.triggered.connect(self.save_file)
+        toolbar.addAction(self._save_action)
+
+        self._save_as_action = QAction("Save As", self)
+        self._save_as_action.setShortcut("Ctrl+Shift+S")
+        self._save_as_action.setToolTip("Save to a new file (Ctrl+Shift+S)")
+        self._save_as_action.setEnabled(False)
+        self._save_as_action.triggered.connect(self.save_file_as)
+        toolbar.addAction(self._save_as_action)
 
         toolbar.addSeparator()
 
@@ -107,6 +121,24 @@ class PDFReader(QMainWindow):
         fit_page_action.triggered.connect(lambda: self._pdf_view.fit_to_page())
         toolbar.addAction(fit_page_action)
 
+        toolbar.addSeparator()
+
+        field_font_dec_action = QAction("A−", self)
+        field_font_dec_action.setToolTip("Decrease annotation font size (Ctrl+[)")
+        field_font_dec_action.setShortcut("Ctrl+[")
+        field_font_dec_action.triggered.connect(
+            lambda: self._pdf_view.adjust_field_font_size(-FONT_SIZE_STEP)
+        )
+        toolbar.addAction(field_font_dec_action)
+
+        field_font_inc_action = QAction("A+", self)
+        field_font_inc_action.setToolTip("Increase annotation font size (Ctrl+])")
+        field_font_inc_action.setShortcut("Ctrl+]")
+        field_font_inc_action.triggered.connect(
+            lambda: self._pdf_view.adjust_field_font_size(FONT_SIZE_STEP)
+        )
+        toolbar.addAction(field_font_inc_action)
+
         # Central widget: splitter with sidebar + main view
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setHandleWidth(4)
@@ -143,6 +175,8 @@ class PDFReader(QMainWindow):
         # Right: PDF view
         self._pdf_view = PDFGraphicsView()
         self._pdf_view.zoom_changed.connect(self._on_zoom_changed)
+        self._pdf_view.page_modified.connect(self._render_current_page)
+        self._pdf_view.status_message.connect(lambda msg: self._status.showMessage(msg, 4000))
         splitter.addWidget(self._pdf_view)
 
         splitter.setStretchFactor(0, 0)
@@ -178,6 +212,31 @@ class PDFReader(QMainWindow):
         if path:
             self._load_pdf(path)
 
+    def save_file(self):
+        if not self._doc:
+            return
+        try:
+            self._doc.save(self._doc_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+            self._status_label.setText(f"Saved — {self._doc_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", f"Could not save file:\n{exc}")
+
+    def save_file_as(self):
+        if not self._doc:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save PDF As", self._doc_path, "PDF Files (*.pdf);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            self._doc.save(path)
+            self._doc_path = path
+            self.setWindowTitle(f"PDF Reader — {path.split('/')[-1]}")
+            self._status_label.setText(f"Saved — {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", f"Could not save file:\n{exc}")
+
     def _load_pdf(self, path: str):
         # Cancel any in-progress thumbnail generation
         self._cancel_thumbnail_worker()
@@ -198,6 +257,8 @@ class PDFReader(QMainWindow):
         self._thumb_list.clear()
         self._prev_action.setEnabled(True)
         self._next_action.setEnabled(True)
+        self._save_action.setEnabled(True)
+        self._save_as_action.setEnabled(True)
 
         self.setWindowTitle(f"PDF Reader — {path.split('/')[-1]}")
         self._render_current_page()
@@ -266,10 +327,17 @@ class PDFReader(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        # Clear refs when the thread finishes naturally so closeEvent doesn't
+        # call isRunning() on an already-deleted C++ QThread object.
+        thread.finished.connect(self._on_thumb_thread_finished)
 
         self._thumb_thread = thread
         self._thumb_worker = worker
         thread.start()
+
+    def _on_thumb_thread_finished(self):
+        self._thumb_thread = None
+        self._thumb_worker = None
 
     def _on_thumbnail_ready(self, page_num: int, pixmap):
         item = self._thumb_list.item(page_num)
